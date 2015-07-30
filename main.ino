@@ -12,11 +12,30 @@
 #define PRINTLN(x)
 #endif
 
+/*
+The available states of the leds are:
+  * always off, leds are shut off
+  * always on, leds are dimmed to the level referred to as 'dim level' below
+  * motion sensor, leds are normally dimmed to 'minimum dim level' and increased to 'dim level' when motion is detected
+*/
+
+/*
+Serial commands:
+ 'u' / 'd'  increase / decrease the dim level
+ 'p' / 'o'  increase / decrease the minimum dim level
+ 'l' / 'k'  increase / decrease time leds are lit when motion sensor is triggered
+ 'b' / 'n'  increase / decrease the sleep time in loop (higher = slower dim)
+ 's'        save the dim level, lit time, etc etc (else changes are lost upon reboot)
+ 'm'        cycle through the states
+*/
+
+
 enum {
   EEPROM_ADDR_DIM_LVL = 0,  /* dim level when motion sensor is used or static state                  */
   EEPROM_ADDR_STATE,        /* state to startup at                                                   */
   EEPROM_ADDR_LIT_TIME,     /* time that leds are on before dimming down                             */
-  EEPROM_ADDR_MIN_DIM_LVL   /* minimum dim level when motion sensor is used but no motion registered */
+  EEPROM_ADDR_MIN_DIM_LVL,  /* minimum dim level when motion sensor is used but no motion registered */
+  EEPROM_ADDR_SLEEP_TIME    /* sleep time in the loop(), higher = slower dim                         */
 };
 
 enum AnalogPin {
@@ -82,6 +101,7 @@ time_t activity_led_lit_since = 0;
 
 uint8_t lit_time = 0; //time leds are lit when motion sensor activates
 
+uint8_t sleep_time = 10;
 
 void serial();
 
@@ -96,7 +116,7 @@ void activity_led_off(){
   digitalWrite(PIN_ACTIVITY_LED, LOW);
   activity_led_lit_since = 0;
 }
-  
+
 
 void rf_callback(NewRemoteCode code){
 /*
@@ -126,14 +146,14 @@ void rf_callback(NewRemoteCode code){
     default:
       break;
     }
-    activity_led_on(); 
+    activity_led_on();
 
   }else if (code.address == 25324145){
     lit_time = code.dimLevel*4;
     PRINT("New dim time for motion sensor: ");
     PRINT(lit_time);
     EEPROM.write(EEPROM_ADDR_LIT_TIME, lit_time);
-    activity_led_on(); 
+    activity_led_on();
   }else if (code.address == 32847562){
     motion_dim_level = code.dimLevel*16;
     PRINT("New dim level: ");
@@ -145,7 +165,7 @@ void rf_callback(NewRemoteCode code){
       state = STATE_STATIC_ON;
       target_dim_level = code.dimLevel*16;
     }
-    activity_led_on(); 
+    activity_led_on();
   }
   EEPROM.write(EEPROM_ADDR_STATE, state);
 }
@@ -175,7 +195,7 @@ void setup(){
   state = (state_e)EEPROM.read(EEPROM_ADDR_STATE);
   PRINT("state: ");
   PRINTLN(state);
-      
+
   lit_time = EEPROM.read(EEPROM_ADDR_LIT_TIME);
   PRINT("lit time:");
   PRINTLN(lit_time);
@@ -186,15 +206,17 @@ void setup(){
     target_dim_level = min_dim_level;
   }
 
+  sleep_time = EEPROM.read(EEPROM_ADDR_SLEEP_TIME);
+  PRINT("sleep time:");
+  PRINTLN(sleep_time);
+
+
   PRINTLN("done.");
   digitalWrite(PIN_ACTIVITY_LED, LOW);
 }
 
 void loop(){
-  delay(10);
-
-//  delay(990);
-//  PRINTLN(state);
+  delay(sleep_time);
 
   if (activity_led_lit && activity_led_lit_since +1000 < millis()){
     activity_led_off();
@@ -202,11 +224,11 @@ void loop(){
 
   if (target_dim_level < current_dim_level){
     current_dim_level -= 2;
-    analogWrite(PIN_LEDS, current_dim_level); 
+    analogWrite(PIN_LEDS, current_dim_level);
     PRINTLN(current_dim_level);
   }else if (target_dim_level > current_dim_level){
     current_dim_level += 2;
-    analogWrite(PIN_LEDS, current_dim_level); 
+    analogWrite(PIN_LEDS, current_dim_level);
     PRINTLN(current_dim_level);
   } else {
     /* target dim level reached */
@@ -231,6 +253,8 @@ void loop(){
     }
     break;
   default:
+    PRINT("bad state: ");
+    PRINTLN(state);
     break;
   }
 }
@@ -241,20 +265,20 @@ void serial(){
     switch(Serial.read()){
     case 'u': /* 'u'p the dim level */
       if (target_dim_level < 254){
-        target_dim_level +=2; 
+        target_dim_level +=2;
         motion_dim_level += 2;
       }
       break;
     case 'p': /* u'p' the min dim level */
       if (min_dim_level < 254 && min_dim_level < motion_dim_level){
-        min_dim_level +=2; 
+        min_dim_level +=2;
         PRINT("min dim: ");
         PRINTLN(min_dim_level);
       }
       break;
     case 'd': /* 'd'own the dim level */
       if (target_dim_level > 1){
-        target_dim_level -=2; 
+        target_dim_level -=2;
         motion_dim_level -= 2;
       }
       break;
@@ -271,10 +295,12 @@ void serial(){
       EEPROM.write(EEPROM_ADDR_LIT_TIME, lit_time);
       EEPROM.write(EEPROM_ADDR_STATE, state);
       EEPROM.write(EEPROM_ADDR_MIN_DIM_LVL, min_dim_level);
+      EEPROM.write(EEPROM_ADDR_SLEEP_TIME, sleep_time);
       PRINTLN(EEPROM.read(EEPROM_ADDR_DIM_LVL));
       PRINTLN(EEPROM.read(EEPROM_ADDR_LIT_TIME));
       PRINTLN(EEPROM.read(EEPROM_ADDR_STATE));
       PRINTLN(EEPROM.read(EEPROM_ADDR_MIN_DIM_LVL));
+      PRINTLN(EEPROM.read(EEPROM_ADDR_SLEEP_TIME));
       break;
     case 'l': /* 'l'onger lit time when motion sensor used */
       if (lit_time < 255){
@@ -290,11 +316,25 @@ void serial(){
       PRINT("Lit time: ");
       PRINTLN(lit_time);
       break;
+    case 'b': /* increase sleep time */
+      if (sleep_time < 255){
+        ++sleep_time;
+      }
+      PRINT("sleep time: ");
+      PRINTLN(sleep_time);
+      break;
+    case 'n': /* shorten sleep time */
+      if (sleep_time > 0){
+        --sleep_time;
+      }
+      PRINT("sleep time: ");
+      PRINTLN(sleep_time);
+      break;
     case 'm': /* 'm'otion sensor on/off  (cycle the states)*/
-      state = (state+1) % STATE_END_OF_LIST;
+      state = state+1 % STATE_END_OF_LIST;
       PRINT("state: ");
       PRINTLN(state_e2c(state));
-      
+
     default:
       break;
     }
