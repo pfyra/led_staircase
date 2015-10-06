@@ -27,6 +27,7 @@ Serial commands:
  'b' / 'n'  increase / decrease the sleep time in loop (higher = slower dim)
  's'        save the dim level, lit time, etc etc (else changes are lost upon reboot)
  'm'        cycle through the states
+ 'r'        toggle photoresistor readings
 */
 
 
@@ -39,7 +40,7 @@ enum {
 };
 
 enum AnalogPin {
-  APIN_0 = 0,
+  APIN_PHOTORESISTOR = 0,
   APIN_1,
   APIN_2,
   APIN_3,
@@ -70,7 +71,6 @@ enum InterruptPins {
   INT_MOTION_SENSOR
 };
 
-uint8_t motion_dim_level = 0;  // when motion sensor is used
 enum state_e{
   STATE_STATIC_OFF,
   STATE_STATIC_ON,
@@ -91,6 +91,8 @@ static const char* state_e2c(enum state_e s){
 uint8_t current_dim_level = 0;
 uint8_t target_dim_level = 0;
 uint8_t min_dim_level = 0;
+//uint8_t motion_dim_level = 0;  // when motion sensor is used
+uint16_t target_dim_level_calculation(void);
 
 volatile time_t time_motion = 0;
 
@@ -102,6 +104,12 @@ time_t activity_led_lit_since = 0;
 uint8_t lit_time = 0; //time leds are lit when motion sensor activates
 
 uint8_t sleep_time = 10;
+
+bool photoresistor_readings = false;
+time_t photoresistor_read_time = 0;
+void photoresistor(void);
+uint16_t photoresistor_value = 0;
+
 
 void serial();
 
@@ -116,8 +124,7 @@ void activity_led_off(){
   digitalWrite(PIN_ACTIVITY_LED, LOW);
   activity_led_lit_since = 0;
 }
-
-
+#if 0
 void rf_callback(NewRemoteCode code){
 /*
   PRINTLN(code.address);
@@ -169,6 +176,7 @@ void rf_callback(NewRemoteCode code){
   }
   EEPROM.write(EEPROM_ADDR_STATE, state);
 }
+#endif
 
 void motion_sensor_interrupt(){
   time_motion = now();
@@ -176,19 +184,19 @@ void motion_sensor_interrupt(){
 
 void setup(){
 
-  SERIAL_BEGIN(9600);
+  SERIAL_BEGIN(115200);
   PRINTLN("booting...");
   pinMode(PIN_ACTIVITY_LED, OUTPUT);
   digitalWrite(PIN_ACTIVITY_LED, HIGH);
 
   pinMode(PIN_PIR, INPUT);
   pinMode(PIN_LEDS, OUTPUT);
-
+/*
   motion_dim_level = EEPROM.read(EEPROM_ADDR_DIM_LVL);
   PRINT("max dim level: ");
   PRINTLN(motion_dim_level);
-
-  NewRemoteReceiver::init(INT_RF_RECV, 2, &rf_callback);
+*/
+ // NewRemoteReceiver::init(INT_RF_RECV, 2, &rf_callback);
 
   attachInterrupt(INT_MOTION_SENSOR, motion_sensor_interrupt, HIGH);
 
@@ -201,7 +209,7 @@ void setup(){
   PRINTLN(lit_time);
 
   if (STATE_STATIC_ON == state) {
-    target_dim_level = motion_dim_level;
+    target_dim_level = target_dim_level_calculation();
   } else if (STATE_MOTION_SENSOR == state) {
     target_dim_level = min_dim_level;
   }
@@ -218,22 +226,27 @@ void setup(){
 void loop(){
   delay(sleep_time);
 
-  if (activity_led_lit && activity_led_lit_since +1000 < millis()){
-    activity_led_off();
+  if (current_dim_level == min_dim_level){
+    digitalWrite(PIN_ACTIVITY_LED, LOW);
+  }else{
+    digitalWrite(PIN_ACTIVITY_LED, HIGH);
   }
 
+  photoresistor();
+
   if (target_dim_level < current_dim_level){
+    /* dim down */
     current_dim_level -= 2;
     analogWrite(PIN_LEDS, current_dim_level);
     PRINTLN(current_dim_level);
   }else if (target_dim_level > current_dim_level){
+    /* dim up */
     current_dim_level += 2;
     analogWrite(PIN_LEDS, current_dim_level);
     PRINTLN(current_dim_level);
   } else {
     /* target dim level reached */
   }
-
 
   serial();
 
@@ -245,12 +258,7 @@ void loop(){
     target_dim_level = 0;
     break;
   case STATE_MOTION_SENSOR:
-    if (now() >= time_motion + lit_time){
-      /* dim down again */
-      target_dim_level = min_dim_level;
-    }else{
-      target_dim_level = motion_dim_level;
-    }
+    target_dim_level = target_dim_level_calculation();
     break;
   default:
     PRINT("bad state: ");
@@ -259,27 +267,59 @@ void loop(){
   }
 }
 
+void photoresistor(){
+  if (current_dim_level == min_dim_level){
+    photoresistor_value = analogRead(APIN_PHOTORESISTOR);
+  }
+
+  if (photoresistor_readings){
+    if (photoresistor_read_time + 1 < now()){
+      PRINTLN(photoresistor_value);
+      photoresistor_read_time = now();
+    }
+  }
+}
+
+uint16_t target_dim_level_calculation(void){
+
+  if (now() >= time_motion + lit_time){
+    /* dim down */
+    return  min_dim_level;
+  }
+
+  if (photoresistor_value > 90){
+    /* the stair case is pretty lit up already, dont dim up */
+    return min_dim_level;
+  }
+
+  uint16_t target = 2 * photoresistor_value;
+  if (target > 90){
+    target = 90;
+  } 
+
+  return target;
+}
 
 void serial(){
   while (Serial.available()){
     switch(Serial.read()){
     case 'u': /* 'u'p the dim level */
       if (target_dim_level < 254){
-        target_dim_level +=2;
-        motion_dim_level += 2;
+        target_dim_level += 2;
+//        motion_dim_level += 2;
       }
       break;
     case 'p': /* u'p' the min dim level */
-      if (min_dim_level < 254 && min_dim_level < motion_dim_level){
-        min_dim_level +=2;
+      if (min_dim_level < 254 /*&& min_dim_level < motion_dim_level*/){
+        min_dim_level += 2;
         PRINT("min dim: ");
         PRINTLN(min_dim_level);
       }
       break;
     case 'd': /* 'd'own the dim level */
       if (target_dim_level > 1){
-        target_dim_level -=2;
-        motion_dim_level -= 2;
+        target_dim_level -= 2;
+//        motion_dim_level -= 2;
       }
       break;
     case 'o': /* d'o'wn the min dim level */
@@ -290,8 +330,8 @@ void serial(){
       }
       break;
     case 's': /* 's'ave the dim level */
-      PRINTLN("dim level, lit time, state saved");
-      EEPROM.write(EEPROM_ADDR_DIM_LVL, motion_dim_level);
+      PRINTLN("dim level, lit time, state, sleep time saved");
+//      EEPROM.write(EEPROM_ADDR_DIM_LVL, motion_dim_level);
       EEPROM.write(EEPROM_ADDR_LIT_TIME, lit_time);
       EEPROM.write(EEPROM_ADDR_STATE, state);
       EEPROM.write(EEPROM_ADDR_MIN_DIM_LVL, min_dim_level);
@@ -331,10 +371,21 @@ void serial(){
       PRINTLN(sleep_time);
       break;
     case 'm': /* 'm'otion sensor on/off  (cycle the states)*/
-      state = state+1 % STATE_END_OF_LIST;
+      /* state = state + 1 % STATE_END_OF_LIST; doesn't work, hence: */
+      switch (state){
+      case STATE_STATIC_OFF:    state = STATE_STATIC_ON;     break;
+      case STATE_STATIC_ON:     state = STATE_MOTION_SENSOR; break;
+      case STATE_MOTION_SENSOR: state = STATE_STATIC_OFF;    break;
+      default:                  state = STATE_STATIC_OFF;    break;
+      }
       PRINT("state: ");
       PRINTLN(state_e2c(state));
-
+      break;
+    case 'r': /* toggle photo Resistor readings on/off */
+      photoresistor_readings = !photoresistor_readings;
+      PRINT("photoresistor readings: ");
+      PRINTLN(photoresistor_readings);
+      break;
     default:
       break;
     }
