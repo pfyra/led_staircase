@@ -72,7 +72,7 @@ enum InterruptPins {
 };
 
 enum state_e{
-  STATE_STATIC_OFF,
+  STATE_STATIC_OFF = 0,
   STATE_STATIC_ON,
   STATE_MOTION_SENSOR,
   STATE_END_OF_LIST
@@ -284,18 +284,35 @@ uint16_t target_dim_level_calculation(void){
 
   if (now() >= time_motion + lit_time){
     /* dim down */
+    /* this is the regular, idle, state of the stair case */
     return  min_dim_level;
   }
+
+  /* 
+   * Motion has been detected in the stair case, 
+   * set appropriate dim level:
+   */
 
   if (photoresistor_value > 90){
     /* the stair case is pretty lit up already, dont dim up */
     return min_dim_level;
   }
 
+
+  /* calculate a nice dim target based on the available light */
   uint16_t target = 2 * photoresistor_value;
+
+  /* limit the dim level. Too bright is not nice.. */
   if (target > 90){
     target = 90;
   } 
+
+  if (photoresistor_value < 5){
+    /* it is too dark, give the leds an extra boost */
+    target = min_dim_level + 10;
+  }
+
+  target &= 0xfffe; // make even
 
   return target;
 }
